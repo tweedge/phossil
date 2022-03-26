@@ -99,26 +99,24 @@ def find_zip_if_index(url):
             "Parent directory",
             "parent directory",
         ]
-        for lookup in testing_lookups:
-            if lookup in response:
-                print("- SAW: " + lookup)
+        # for lookup in testing_lookups:
+            # if lookup in response:
+                # print("- SAW: " + lookup)
         soup = BeautifulSoup(response, "lxml")
 
         links = []
         for link in soup.findAll("a"):
             links.append(link.get("href"))
+            
         archive_formats = [".zip", ".7z", ".gz", ".tar", ".rar"]
         for link in links:
             if link:
                 for filetype in archive_formats:
                     if link.endswith(filetype):
-                        print("- GOT: " + link)
+                        print(f"GOT: {link} ({reconstructed_url})")
 
 
-# urls = source_urls_phishtank()
-# for url in urls:
-url = build_internal_url_representation(
-    "https://www.nutralifedirect.com/dfglhk/deadlink/"
-)
-for check in expand_initial_url_set(url):
-    find_zip_if_index(check)
+urls = source_urls_phishtank()
+for url in urls:
+    for check in expand_initial_url_set(url):
+        find_zip_if_index(check)
