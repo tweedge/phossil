@@ -75,6 +75,8 @@ def lambda_handler(event, context):
 
     for link in links:
         absolute_link = assemble_absolute_url(url, link)
+        if not absolute_link:
+            continue
         print(f"Found href to: {absolute_link}")
 
         try:
@@ -131,8 +133,18 @@ def lambda_handler(event, context):
 
 def assemble_absolute_url(phossil_url, new_link):
     for protocol in acceptable_protocols:
-        if new_link.startswith(protocol):
+        if new_link.lower().startswith(protocol):
             return new_link
+
+    special_protocols = ["mailto:"] # TODO: should be fleshed out
+    for protocol in special_protocols:
+        if new_link.lower().startswith(protocol):
+            return new_link
+
+    non_link_protocols = ["javascript:"] # TODO: should be fleshed out
+    for protocol in non_link_protocols:
+        if new_link.lower().startswith(protocol):
+            return False
 
     if new_link.startswith("/"):
         url_root = phossil_url["protocol"] + phossil_url["fqdn"]
