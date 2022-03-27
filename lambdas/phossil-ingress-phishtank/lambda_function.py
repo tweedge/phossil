@@ -48,7 +48,7 @@ def lambda_handler(event, context):
 
     print("Fetching phishing URLs from PhishTank and formatting")
     try:
-        urls = source_urls_phishtank()  # TODO: check the number of days since reported
+        urls = source_urls_phishtank()
     except Exception as e:
         return {"statusCode": 500, "body": e}
 
@@ -100,6 +100,7 @@ def lambda_handler(event, context):
     del new_urls
     random.shuffle(new_urls_to_scan)
 
+    # TODO: make fast https://www.foxy.io/blog/we-love-aws-lambda-but-its-concurrency-handling-with-sqs-is-silly/
     print(f"Queueing {len(new_urls_to_scan)} new fetches to SQS for scanner")
     for url in new_urls_to_scan:
         try:
