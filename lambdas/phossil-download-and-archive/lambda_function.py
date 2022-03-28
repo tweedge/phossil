@@ -26,18 +26,15 @@ def lambda_handler(event, context):
     print(f"Streaming download for: {download_url}")
     connect_timeout = 5
     request_timeout = 65
-    try:
-        request = requests.get(
-            download_url, stream=True, timeout=(connect_timeout, request_timeout)
-        )
+    request = requests.get(
+        download_url, stream=True, timeout=(connect_timeout, request_timeout)
+    )
 
-        incoming_file = open(incoming_file_path, "wb")
-        for chunk in request.iter_content(chunk_size=incoming_data_buffer_size):
-            incoming_file.write(chunk)
-        incoming_file.close()
-        print(f"Download completed!")
-    except Exception as e:
-        return {"statusCode": 408, "body": f"Fetch failed: {e}"}
+    incoming_file = open(incoming_file_path, "wb")
+    for chunk in request.iter_content(chunk_size=incoming_data_buffer_size):
+        incoming_file.write(chunk)
+    incoming_file.close()
+    print(f"Download completed!")
 
     if request.status_code != 200:
         return {"statusCode": 412, "body": f"Fetch returned HTTP {request.status_code}"}
