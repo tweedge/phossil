@@ -37,7 +37,7 @@ Yes I'm keeping notes here
 * should collect emails from kits if possible to report those semiautomatically
 * learn from: https://github.com/t4d/StalkPhish/blob/master/stalkphish/tools/download.py
   * carefully weigh complexity vs fun vs differentiation
-  * stalkphish covers single/few targets comprehensively, it's OK if I cover all targets only for obvious mistakes
+  * stalkphish covers targets comprehensively and should be recommended for investigators, it's OK if I cover targets only for obvious mistakes
   * ex. cloudflare bot bypass is trivial via cfscrape but needs maintenance long-term
 * use git or subversion in scans & figure out how to archive these
 * version my lambdas in git properly once the architecture is more stable
