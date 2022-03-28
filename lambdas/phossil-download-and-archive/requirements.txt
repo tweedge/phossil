@@ -1,0 +1,3 @@
+requests==2.27.1
+requests-random-user-agent==2022.1.23
+filetype==1.0.10
