@@ -14,13 +14,16 @@ Yes I'm keeping notes here
 
 * relationship DDB revamp
 * is it possible to to a put/update as one?
+* do we want this at all?
+
+* i know we have this elsewhere, but maybe track or emit storage of the objects being saved
 
 ## nitpicks
 * change the list of files that are being saved
   * consider cutting down on docs or things you don't know are going to be useful
 * figure out what browser behavior would be tolerable for a phish site (or just don't care, alternatively)
 * decide whether or not to require 200s for even the Big Downloads
-* everyond doesn't need to be in `lambdas/`
+* everyone doesn't need to be in `lambdas/`
 
 ## architecture changes
 * rereading docs I think a FIFO queue is really not going to be useful here
@@ -33,6 +36,7 @@ Yes I'm keeping notes here
 * onboard new data stores (OpenPhish and PhishStats)
 * dashboards! alarms!
   * data growth alarms in case someone tries retaliating with a bunch of 9GB files
+* emit metrics! if cost efficient to do so
 * submit executables to VT/MalShare/etc. automatically because fuck you
 * should collect emails from kits if possible to report those semiautomatically
 * learn from: https://github.com/t4d/StalkPhish/blob/master/stalkphish/tools/download.py
