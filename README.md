@@ -45,7 +45,7 @@ A few design decisions worth calling out:
 
 ## Receipts
 
-phossil ran continuously in us-east-2 from March 26, 2022 until I republished it here in September 2026 - 4.5 years without missing an hourly PhishTank run. What it collected in that time:
+phossil has been running continuously in us-east-2 since March 26, 2022 - 4.5 years without missing an hourly PhishTank run. What it collected in that time:
 
 | Metric | Count |
 |---|---|
