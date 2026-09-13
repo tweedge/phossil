@@ -1,5 +1,6 @@
 import boto3
 import json
+import os
 from botocore.exceptions import ClientError
 import requests
 import requests_random_user_agent
@@ -11,13 +12,12 @@ incoming_file_path = "/tmp/incoming"
 incoming_data_buffer_size = 65536
 
 ddb_client = boto3.client("dynamodb")
-sqs_client = boto3.client("sqs")
 s3_client = boto3.client("s3")
 
 
 def lambda_handler(event, context):
-    ddb_table_log_source_url = "phossil-archive-relationships"
-    s3_bucket_archive = "phossil-archive"
+    ddb_table_log_source_url = os.environ["PHOSSIL_ARCHIVE_RELATIONSHIPS_TABLE"]
+    s3_bucket_archive = os.environ["PHOSSIL_ARCHIVE_BUCKET"]
 
     download = json.loads(event["Records"][0]["body"])
     download_url = download["download"]

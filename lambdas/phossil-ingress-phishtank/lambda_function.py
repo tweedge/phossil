@@ -1,5 +1,6 @@
 import boto3
 import json
+import os
 import random
 import requests
 from botocore.exceptions import ClientError
@@ -14,7 +15,7 @@ def source_urls_phishtank():
     phishtank_data = "https://data.phishtank.com/data/online-valid.json"
     headers = {"User-Agent": "phossil-ingress-phishtank"}
 
-    request = requests.get(phishtank_data, headers)
+    request = requests.get(phishtank_data, headers=headers)
     if request.status_code != 200:
         raise Exception(f"PhishTank returned bad HTTP code: {request.status_code}")
 
@@ -29,9 +30,9 @@ def source_urls_phishtank():
             phish_verified_obj = datetime.fromisoformat(phish_verified_str)
             now_obj = datetime.now(timezone.utc)
 
-            # TODO: parameterize
+            # PhishTank data is refreshed hourly, but only sites verified in
+            # the last two days are considered fresh enough to scan.
             if now_obj - timedelta(days=2) > phish_verified_obj:
-                # not verified recently enough, toss it
                 continue
 
             url = build_internal_url_representation(phish["url"])
@@ -42,8 +43,8 @@ def source_urls_phishtank():
 
 
 def lambda_handler(event, context):
-    ddb_table_phishing_urls = "phossil-known-phishing-urls"
-    sqs_queue_scanner = "phossil-url-fetch-queue.fifo"
+    ddb_table_phishing_urls = os.environ["PHOSSIL_KNOWN_URLS_TABLE"]
+    sqs_queue_url = os.environ["PHOSSIL_URL_FETCH_QUEUE_URL"]
     errors = 0
 
     print("Fetching phishing URLs from PhishTank and formatting")
@@ -64,7 +65,7 @@ def lambda_handler(event, context):
             )
         except ClientError as e:
             print(f"DynamoDB GET ERROR: {e.response['Error']['Message']}")
-            errors = 0
+            errors += 1
             # we don't know if we've scanned this, so let's skip it
             continue
 
@@ -73,19 +74,18 @@ def lambda_handler(event, context):
             continue
 
         try:
-            # TODO: could/should this store more data from PhishTank or other sources?
             ddb_client.put_item(
                 TableName=ddb_table_phishing_urls,
                 Item={"phishing_url": {"S": original_url}},
             )
         except ClientError as e:
             print(f"DynamoDB PUT ERROR: {e.response['Error']['Message']}")
-            errors = 0
+            errors += 1
             # we don't know if we've saved this, so let's skip it
             continue
         except Exception as e:
             print(f"Unknown PUT ERROR: {e}")
-            errors = 0
+            errors += 1
             # we don't know if we've saved this, so let's skip it
             continue
 
@@ -100,17 +100,14 @@ def lambda_handler(event, context):
     del new_urls
     random.shuffle(new_urls_to_scan)
 
-    # TODO: make fast https://www.foxy.io/blog/we-love-aws-lambda-but-its-concurrency-handling-with-sqs-is-silly/
     print(f"Queueing {len(new_urls_to_scan)} new fetches to SQS for scanner")
     for url in new_urls_to_scan:
         try:
-            queue_url = sqs_client.get_queue_url(QueueName=sqs_queue_scanner)
             response = sqs_client.send_message(
-                QueueUrl=queue_url["QueueUrl"],
+                QueueUrl=sqs_queue_url,
                 MessageGroupId="Ingress",
                 MessageBody=json.dumps(url),
             )
-            # TODO: does response need to be checked?
         except ClientError as e:
             print(f"SQS Publish ERROR: {e.response['Error']['Message']}")
             errors += 1

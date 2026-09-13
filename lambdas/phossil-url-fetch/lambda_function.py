@@ -1,5 +1,6 @@
 import boto3
 import json
+import os
 from botocore.exceptions import ClientError
 from bs4 import BeautifulSoup
 import requests
@@ -38,8 +39,8 @@ sqs_client = boto3.client("sqs")
 
 
 def lambda_handler(event, context):
-    ddb_table_url_relationships = "phossil-url-relationships"
-    sqs_queue_scanner = "phossil-download-queue.fifo"
+    ddb_table_url_relationships = os.environ["PHOSSIL_URL_RELATIONSHIPS_TABLE"]
+    sqs_queue_url = os.environ["PHOSSIL_DOWNLOAD_QUEUE_URL"]
 
     url = json.loads(event["Records"][0]["body"])
     reconstructed_url = url["protocol"] + url["fqdn"] + url["url"]
@@ -102,9 +103,8 @@ def lambda_handler(event, context):
         if assessment["Worth"]:
             print(f"Queueing {absolute_link} for download")
             try:
-                queue_url = sqs_client.get_queue_url(QueueName=sqs_queue_scanner)
                 response = sqs_client.send_message(
-                    QueueUrl=queue_url["QueueUrl"],
+                    QueueUrl=sqs_queue_url,
                     MessageGroupId="Ingress",
                     MessageBody=json.dumps(
                         {
@@ -116,7 +116,6 @@ def lambda_handler(event, context):
                         }
                     ),
                 )
-                # TODO: does response need to be checked?
             except ClientError as e:
                 print(f"SQS Publish ERROR: {e.response['Error']['Message']}")
                 errors += 1
