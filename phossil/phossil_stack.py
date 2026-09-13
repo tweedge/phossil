@@ -145,7 +145,7 @@ class PhossilStack(Stack):
             architecture=lambda_.Architecture.ARM_64,
             code=bundled_lambda_code(LAMBDAS_DIR / "phossil-url-fetch", lambda_.Runtime.PYTHON_3_14),
             handler="lambda_function.lambda_handler",
-            memory_size=256,
+            memory_size=512,
             timeout=Duration.seconds(300),
             environment={
                 "PHOSSIL_URL_RELATIONSHIPS_TABLE": url_relationships_table.table_name,
