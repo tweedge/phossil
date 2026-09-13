@@ -51,7 +51,8 @@ def lambda_handler(event, context):
     try:
         urls = source_urls_phishtank()
     except Exception as e:
-        return {"statusCode": 500, "body": e}
+        print(f"PhishTank fetch failed: {e}")
+        return {"statusCode": 500, "body": str(e)}
 
     print(f"Deduplicating {len(urls)} phishing URLs using DynamoDB")
     new_urls = []
