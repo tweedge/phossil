@@ -113,7 +113,7 @@ Resource sizing follows the original deployment, with two deliberate upgrades:
 
 * **PhishTank is rate-limited.** The public feed allows roughly one download per hour per source IP, which lines up nicely with the hourly schedule. If ingress occasionally logs an HTTP error from the feed (PhishTank's CDN is imperfect), nothing breaks - the next hour's run will catch up, since URLs are deduplicated in DynamoDB.
 * **This is active scanning.** You'll be making requests to live phishing sites, usually hosted by people who did not ask whether that's okay, and sometimes hosted by bulletproof hosts who won't appreciate it. Run this from cloud infrastructure you're authorized to use, don't do it from your home IP or your employer's network without thinking it through first.
-* **Costs are small but nonzero.** DynamoDB on-demand, SQS, Lambda, and S3 for this workload have cost me single-digit dollars per month. The table sizes grow slowly (about 1.18M rows over 4.5 years); the S3 bucket grows with however many files the internet throws at you.
+* **Costs are small but nonzero.** Across 4.5 years of running, phossil averaged about **$1.20/month** - almost all of it S3 storage and DynamoDB request units, with Lambda, SQS, CloudWatch, and EventBridge effectively free under the always-on free tier. The table sizes grow slowly (about 1.18M rows over 4.5 years); the S3 bucket grows with however many files the internet throws at you.
 * **Log retention is set to three months** to keep CloudWatch costs down. Adjust `log_retention` in `phossil/phossil_stack.py` if you want longer.
 
 ## License
