@@ -24,14 +24,15 @@ Three Lambdas pass work to each other through FIFO SQS queues:
 flowchart TD
     PT[(PhishTank<br>verified feed)] --> ING
     EB[EventBridge<br>hourly at :07] --> ING[Lambda<br>phossil-ingress-phishtank]
+    WEB((phishing<br>site))
+    WEB -->|page HTML| UF[Lambda<br>phossil-url-fetch]
+    WEB -->|file contents| DL[Lambda<br>phossil-download-and-archive]
     ING -->|dedupe<br>known URLs| DDB1[(DynamoDB<br>phossil-known-phishing-urls)]
     ING -->|queue each path<br>to scan| Q1[(SQS FIFO<br>phossil-url-fetch-queue)]
-    Q1 --> UF[Lambda<br>phossil-url-fetch]
-    UF -->|fetch page| WEB((phishing<br>site))
+    Q1 --> UF
     UF -->|href graph| DDB2[(DynamoDB<br>phossil-url-relationships)]
     UF -->|queue files<br>worth keeping| Q2[(SQS FIFO<br>phossil-download-queue)]
-    Q2 --> DL[Lambda<br>phossil-download-and-archive]
-    DL -->|stream file| WEB
+    Q2 --> DL
     DL -->|URL, hash,<br>filetype| DDB3[(DynamoDB<br>phossil-archive-relationships)]
     DL -->|unique files<br>by sha256| S3[(S3<br>phossil-archive)]
 ```
