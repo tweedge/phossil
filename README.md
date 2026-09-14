@@ -116,6 +116,43 @@ Resource sizing follows the original deployment, with two deliberate upgrades:
 * **Costs are small but nonzero.** Across 4.5 years of running, phossil averaged about **$1.20/month** - almost all of it S3 storage and DynamoDB request units, with Lambda, SQS, CloudWatch, and EventBridge effectively free under the always-on free tier. The table sizes grow slowly (about 1.18M rows over 4.5 years); the S3 bucket grows with however many files the internet throws at you.
 * **Log retention is set to three months** to keep CloudWatch costs down. Adjust `log_retention` in `phossil/phossil_stack.py` if you want longer.
 
+## Querying Your Data
+
+`tools/phossil` is a CLI for asking questions of the tables phossil builds - lookups, breakdowns, and full exports. It only needs boto3:
+
+```bash
+pip install -r tools/requirements.txt
+```
+
+The highlights:
+
+```bash
+# everything known about a site: known URLs, archive hits, optionally the link graph
+python3 tools/phossil where phish.test --profile tweedge --region us-east-2
+
+# distinct files with source counts - the same kit hosted at 10 domains shows up once, count 10
+python3 tools/phossil digests --dups-only
+
+# what got downloaded, by category and filetype, including where the URL lied about the content
+python3 tools/phossil filetypes
+python3 tools/phossil filetypes --mismatches
+
+# all archived files whose source URL matches a substring
+python3 tools/phossil kits netlify --category Archives
+
+# one row by digest, relationship_id, or source URL - keys are derived the same way the Lambdas do it
+python3 tools/phossil key --fetched https://site/login/ --original https://site/login --href https://site/kit.zip
+python3 tools/phossil get 2a2b01f796d12e11f8feeb85cc0f401b247b0a07cecf17faa3a5964af04e2cfe
+
+# point-and-shoot health check: table counts, distinct digests, queue depths, archive size
+python3 tools/phossil stats
+
+# get the data out for real analysis - SQLite gives you SQL over 13.5M link rows
+python3 tools/phossil export relationships --format sqlite --out links.sqlite --yes
+```
+
+Also in there: `relationships` (hrefs out of, or `--to` for inbound), `crawl-tree` (reconstructs the path-prefix scan frontier for a reported URL), `fqdn-stats` (top domains in the known-URL table), and `export --format json|csv` with `--where col=value` filters. Run any command with `--help` for the fine print. Two things to know: the link-graph table has no secondary indexes, so `where --include-relationships`, `relationships`, and `crawl-tree` run full parallel scans (~$2-4 of read capacity per pass over 13.5M rows, and the CLI asks before doing it), and everything else is penny-territory. Global flags (`--profile`, `--region`, `--output json`, `--segments`) work before or after the subcommand.
+
 ## License
 
 MIT - see [LICENSE](LICENSE).

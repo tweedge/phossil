@@ -1,0 +1,541 @@
+#!/usr/bin/env python3
+"""Query tools for phossil's DynamoDB tables and S3 archive."""
+import argparse
+import csv
+import hashlib
+import json
+import os
+import re
+import sqlite3
+import sys
+import threading
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+
+import boto3
+
+TABLES = {
+    "known": {
+        "name": "phossil-known-phishing-urls",
+        "columns": ["phishing_url"],
+    },
+    "relationships": {
+        "name": "phossil-url-relationships",
+        "columns": ["relationship_id", "fetched_url", "original_url", "referenced_url"],
+    },
+    "archive": {
+        "name": "phossil-archive-relationships",
+        "columns": [
+            "relationship_id",
+            "source_url",
+            "digest",
+            "category",
+            "extension",
+            "inferred_extension",
+            "inferred_mime_type",
+        ],
+    },
+}
+
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+HEX32 = re.compile(r"^[0-9a-f]{32}$")
+
+
+def resolve_table(alias):
+    alias = alias.removeprefix("phossil-")
+    for short, spec in TABLES.items():
+        if alias in (short, spec["name"], spec["name"].removeprefix("phossil-")):
+            return spec
+    raise SystemExit(f"unknown table '{alias}' (known: {', '.join(TABLES)})")
+
+
+def make_session(args):
+    return boto3.session.Session(profile_name=args.profile, region_name=args.region)
+
+
+def scan_table(client, spec, projection, filter_expression=None, attr_values=None,
+               segments=1, quiet=False):
+    kwargs = {"TableName": spec["name"]}
+    if projection:
+        kwargs["ProjectionExpression"] = ",".join(projection)
+    if filter_expression:
+        kwargs["FilterExpression"] = filter_expression
+    if attr_values:
+        kwargs["ExpressionAttributeValues"] = attr_values
+
+    items = []
+    lock = threading.Lock()
+    counter = [0]
+
+    def worker(segment):
+        req = dict(kwargs)
+        if segments > 1:
+            req["Segment"] = segment
+            req["TotalSegments"] = segments
+        last_key = None
+        while True:
+            if last_key:
+                req["ExclusiveStartKey"] = last_key
+            resp = client.scan(**req)
+            batch = resp.get("Items", [])
+            with lock:
+                items.extend(batch)
+                counter[0] += len(batch)
+                if not quiet and counter[0] and counter[0] % 50000 < len(batch):
+                    print(f"  ... {counter[0]} rows scanned", file=sys.stderr)
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                return
+
+    with ThreadPoolExecutor(max_workers=segments) as pool:
+        list(pool.map(worker, range(segments)))
+    return items
+
+
+def confirm_expensive(args, spec):
+    if args.yes or spec["name"] != "phossil-url-relationships":
+        return True
+    print(
+        f"'{spec['name']}' has no secondary indexes, so this runs a full scan of "
+        "~13.5M rows (roughly $2-4 of read capacity per pass).",
+        file=sys.stderr,
+    )
+    if not sys.stdin.isatty():
+        print("Re-run with --yes to proceed non-interactively.", file=sys.stderr)
+        return False
+    return input("Proceed? [y/N] ").strip().lower() == "y"
+
+
+def parse_url(original):
+    for protocol in ("http://", "https://"):
+        if original.startswith(protocol):
+            rest = original[len(protocol):]
+            slash = rest.find("/")
+            if slash == -1:
+                return protocol, rest, "/"
+            return protocol, rest[:slash], rest[slash:]
+    return None
+
+
+def expand_initial_url_set(url):
+    if url["url"] == "/":
+        return [dict(url)]
+    new_urls = []
+    components = url["url"].strip("/").split("/")
+    components.insert(0, "")
+    for ctr in range(0, len(components) + 1):
+        candidate = dict(url)
+        parts = []
+        for i in range(0, ctr):
+            parts.append(components[i])
+        parts.append("")
+        candidate["url"] = "/".join(parts)
+        if candidate["url"] == "":
+            continue
+        if ctr >= len(components) and len(candidate["url"]) > 1:
+            candidate["url"] = candidate["url"].rstrip("/")
+        new_urls.append(candidate)
+    return new_urls
+
+
+def derive_relationship_id(*parts):
+    return hashlib.sha256("".join(parts).encode("utf-8")).hexdigest()
+
+
+def fmt_table(rows, cols):
+    if not rows:
+        print("(no results)")
+        return
+    widths = {c: max(len(c), *(len(str(r.get(c, ""))) for r in rows)) for c in cols}
+    print("  ".join(c.ljust(widths[c]) for c in cols))
+    print("  ".join("-" * widths[c] for c in cols))
+    for r in rows:
+        print("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols))
+
+
+def emit(args, rows, cols):
+    if args.output == "json":
+        print(json.dumps(rows, indent=2, default=str))
+    else:
+        fmt_table(rows, cols)
+
+
+def item_to_row(item, cols):
+    return {c: item[c]["S"] for c in cols if c in item}
+
+
+def cmd_key(args, _client=None):
+    print(derive_relationship_id(args.fetched, args.original, args.href))
+
+
+def cmd_get(args, client):
+    key = args.key
+    found = []
+    if HEX64.match(key):
+        resp = client.get_item(TableName=TABLES["relationships"]["name"],
+                               Key={"relationship_id": {"S": key}})
+        if "Item" in resp:
+            found.append({"table": TABLES["relationships"]["name"],
+                          **item_to_row(resp["Item"], TABLES["relationships"]["columns"])})
+        resp = client.get_item(TableName=TABLES["archive"]["name"],
+                               Key={"relationship_id": {"S": key}})
+        if "Item" in resp:
+            found.append({"table": TABLES["archive"]["name"],
+                          **item_to_row(resp["Item"], TABLES["archive"]["columns"])})
+        if not found:
+            rows = scan_table(
+                client, TABLES["archive"], TABLES["archive"]["columns"],
+                "digest = :d", {":d": {"S": key}}, args.segments, quiet=True,
+            )
+            found.extend(item_to_row(r, TABLES["archive"]["columns"]) for r in rows)
+        emit(args, found, ["table"] + TABLES["archive"]["columns"])
+    else:
+        rows = scan_table(
+            client, TABLES["archive"], TABLES["archive"]["columns"],
+            "source_url = :u", {":u": {"S": key}}, args.segments, quiet=True,
+        )
+        known = client.get_item(TableName=TABLES["known"]["name"],
+                                Key={"phishing_url": {"S": key}})
+        if "Item" in known:
+            print(f"known phishing URL: {key}")
+        emit(args, [item_to_row(r, TABLES["archive"]["columns"]) for r in rows],
+             TABLES["archive"]["columns"])
+
+
+def cmd_where(args, client):
+    host = args.target
+    parsed = parse_url(host if "://" in host else "https://" + host)
+    host = parsed[1] if parsed else host
+    print(f"known phishing URLs mentioning '{host}':")
+    known = scan_table(
+        client, TABLES["known"], ["phishing_url"],
+        "contains(phishing_url, :h)", {":h": {"S": host}},
+        args.segments, quiet=True,
+    )
+    for r in known[: args.limit]:
+        print(f"  {r['phishing_url']['S']}")
+    if not known:
+        print("  (none)")
+    print(f"archived downloads from '{host}':")
+    archive = scan_table(
+        client, TABLES["archive"], TABLES["archive"]["columns"],
+        "contains(source_url, :h)", {":h": {"S": host}},
+        args.segments, quiet=True,
+    )
+    for r in archive[: args.limit]:
+        print(f"  {r['source_url']['S']} -> {r['digest']['S'][:16]} ({r['category']['S']})")
+    if not archive:
+        print("  (none)")
+    if args.include_relationships:
+        if not confirm_expensive(args, TABLES["relationships"]):
+            return
+        print(f"link graph mentioning '{host}' (first {args.limit}):")
+        rels = scan_table(
+            client, TABLES["relationships"],
+            ["fetched_url", "original_url", "referenced_url"],
+            "(contains(fetched_url, :h)) OR (contains(original_url, :h)) OR (contains(referenced_url, :h))",
+            {":h": {"S": host}},
+            args.segments,
+        )
+        for r in rels[: args.limit]:
+            print(f"  {r['fetched_url']['S']} -> {r['referenced_url']['S']}")
+        if not rels:
+            print("  (none)")
+
+
+def cmd_relationships(args, client):
+    spec = TABLES["relationships"]
+    if not confirm_expensive(args, spec):
+        return
+    if args.to:
+        rows = scan_table(
+            client, spec, spec["columns"], "referenced_url = :u",
+            {":u": {"S": args.to}}, args.segments,
+        )
+    else:
+        rows = scan_table(
+            client, spec, spec["columns"], "fetched_url = :u",
+            {":u": {"S": args.source}}, args.segments,
+        )
+    emit(args, [item_to_row(r, spec["columns"]) for r in rows], spec["columns"])
+
+
+def cmd_crawl_tree(args, client):
+    parsed = parse_url(args.original)
+    if not parsed:
+        raise SystemExit("original URL must start with http:// or https://")
+    protocol, fqdn, path = parsed
+    expanded = expand_initial_url_set({"protocol": protocol, "fqdn": fqdn, "url": path})
+    candidates = [protocol + fqdn + u["url"] for u in expanded]
+    spec = TABLES["relationships"]
+    if not confirm_expensive(args, spec):
+        return
+    attr_values = {f":f{i}": {"S": c} for i, c in enumerate(candidates)}
+    expression = "fetched_url IN (" + ", ".join(attr_values) + ")"
+    rows = scan_table(client, spec, spec["columns"], expression, attr_values, args.segments)
+    grouped = {}
+    for r in rows:
+        grouped.setdefault(r["fetched_url"]["S"], []).append(r["referenced_url"]["S"])
+    for candidate in candidates:
+        hrefs = grouped.get(candidate, [])
+        print(f"{candidate}")
+        for href in sorted(set(hrefs))[: args.limit]:
+            print(f"  -> {href}")
+        if not hrefs:
+            print("  (not crawled or no hrefs recorded)")
+
+
+def cmd_digests(args, client):
+    spec = TABLES["archive"]
+    rows = scan_table(client, spec, ["digest", "source_url"], None, None, args.segments, quiet=True)
+    by_digest = {}
+    for r in rows:
+        by_digest.setdefault(r["digest"]["S"], []).append(r["source_url"]["S"])
+    out = [
+        {"digest": d, "sources": len(urls), "source_url": urls[0]}
+        for d, urls in sorted(by_digest.items(), key=lambda kv: -len(kv[1]))
+        if not args.dups_only or len(urls) > 1
+    ]
+    emit(args, out, ["digest", "sources", "source_url"])
+
+
+def cmd_filetypes(args, client):
+    spec = TABLES["archive"]
+    rows = scan_table(client, spec, spec["columns"], None, None, args.segments, quiet=True)
+    if args.mismatches:
+        mismatched = [
+            r for r in rows
+            if r["inferred_extension"]["S"] not in ("Unknown", r["extension"]["S"].lstrip("."))
+        ]
+        out = [
+            {"source_url": r["source_url"]["S"], "extension": r["extension"]["S"],
+             "inferred_extension": r["inferred_extension"]["S"]}
+            for r in mismatched
+        ]
+        emit(args, out, ["source_url", "extension", "inferred_extension"])
+        return
+    print("by category:")
+    for cat, n in Counter(r["category"]["S"] for r in rows).most_common():
+        print(f"  {cat}: {n}")
+    print("by extension (from URL):")
+    for ext, n in Counter(r["extension"]["S"] for r in rows).most_common(args.top):
+        print(f"  {ext}: {n}")
+    print("by inferred extension (from content):")
+    for ext, n in Counter(r["inferred_extension"]["S"] for r in rows).most_common(args.top):
+        print(f"  {ext}: {n}")
+
+
+def cmd_kits(args, client):
+    spec = TABLES["archive"]
+    attr_values = {":s": {"S": args.domain}}
+    expression = "contains(source_url, :s)"
+    if args.category:
+        expression += " AND category = :c"
+        attr_values[":c"] = {"S": args.category}
+    rows = scan_table(client, spec, spec["columns"], expression, attr_values, args.segments, quiet=True)
+    out = [
+        {"source_url": r["source_url"]["S"], "digest": r["digest"]["S"][:16],
+         "category": r["category"]["S"], "inferred": r["inferred_extension"]["S"]}
+        for r in rows
+    ]
+    emit(args, out, ["source_url", "digest", "category", "inferred"])
+
+
+def cmd_fqdn_stats(args, client):
+    rows = scan_table(client, TABLES["known"], ["phishing_url"], None, None,
+                      args.segments, quiet=True)
+    hosts = Counter()
+    for r in rows:
+        parsed = parse_url(r["phishing_url"]["S"])
+        if parsed:
+            hosts[parsed[1].split(":")[0].lower()] += 1
+    print(f"distinct FQDNs: {len(hosts)} across {len(rows)} URLs")
+    emit(args, [{"fqdn": h, "urls": n} for h, n in hosts.most_common(args.top)], ["fqdn", "urls"])
+
+
+def cmd_export(args, client):
+    spec = resolve_table(args.table)
+    attr_values = {}
+    conditions = []
+    for cond in args.where or []:
+        col, _, value = cond.partition("=")
+        if col not in spec["columns"]:
+            raise SystemExit(f"unknown column '{col}' for {spec['name']}")
+        attr_values[f":{col}"] = {"S": value}
+        conditions.append(f"{col} = :{col}")
+    if spec["name"] == "phossil-url-relationships" and not args.yes:
+        if not confirm_expensive(args, spec):
+            return
+    rows = scan_table(
+        client, spec, spec["columns"],
+        " AND ".join(conditions) if conditions else None,
+        attr_values or None, args.segments,
+    )
+    data = [item_to_row(r, spec["columns"]) for r in rows]
+    if args.format == "json":
+        for row in data:
+            print(json.dumps(row, default=str))
+    elif args.format == "csv":
+        writer = csv.DictWriter(sys.stdout, fieldnames=spec["columns"])
+        writer.writeheader()
+        writer.writerows(data)
+    elif args.format == "sqlite":
+        if not args.out:
+            raise SystemExit("--format sqlite requires --out <path>")
+        if os.path.exists(args.out):
+            os.remove(args.out)
+        conn = sqlite3.connect(args.out)
+        quoted = '"' + spec["name"] + '"'
+        cols_sql = ", ".join(f'"{c}" TEXT' for c in spec["columns"])
+        conn.execute(f"CREATE TABLE {quoted} ({cols_sql}, "
+                     f"PRIMARY KEY ({spec['columns'][0]}))")
+        placeholders = ", ".join("?" for _ in spec["columns"])
+        conn.executemany(
+            f"INSERT OR REPLACE INTO {quoted} VALUES ({placeholders})",
+            [tuple(row.get(c, "") for c in spec["columns"]) for row in data],
+        )
+        conn.commit()
+        conn.close()
+        print(f"wrote {len(data)} rows to {args.out}", file=sys.stderr)
+
+
+def cmd_stats(args, client):
+    for short, spec in TABLES.items():
+        if args.exact:
+            count = client.scan(TableName=spec["name"], Select="COUNT")["Count"]
+            print(f"{spec['name']}: {count} items")
+        else:
+            resp = client.describe_table(TableName=spec["name"])
+            print(f"{spec['name']}: ~{resp['Table']['ItemCount']} items "
+                  f"({resp['Table']['TableSizeBytes']} bytes, --exact for a live count)")
+    archive_rows = scan_table(client, TABLES["archive"], ["digest"], None, None,
+                              args.segments, quiet=True)
+    print(f"distinct digests: {len(set(r['digest']['S'] for r in archive_rows))}")
+    sqs = make_session(args).client("sqs")
+    for queue_name in ("phossil-url-fetch-queue.fifo", "phossil-download-queue.fifo",
+                       "phossil-url-fetch-dlq.fifo", "phossil-download-dlq.fifo"):
+        try:
+            resp = sqs.get_queue_url(QueueName=queue_name)
+            attrs = sqs.get_queue_attributes(
+                QueueUrl=resp["QueueUrl"],
+                AttributeNames=["ApproximateNumberOfMessages"],
+            )["Attributes"]
+            print(f"{queue_name}: {attrs['ApproximateNumberOfMessages']} messages")
+        except sqs.exceptions.QueueDoesNotExist:
+            print(f"{queue_name}: not found")
+    s3 = make_session(args).client("s3")
+    for bucket in s3.list_buckets()["Buckets"]:
+        name = bucket["Name"]
+        if not name.startswith("phossil-archive"):
+            continue
+        location = s3.get_bucket_location(Bucket=name)["LocationConstraint"] or "us-east-1"
+        if location != args.region:
+            continue
+        count, total_bytes, newest = 0, 0, None
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=name):
+            for obj in page.get("Contents", []):
+                count += 1
+                total_bytes += obj["Size"]
+                newest = max(newest or obj["LastModified"], obj["LastModified"])
+        print(f"{name}: {count} objects, {total_bytes / 1073741824:.2f} GiB, "
+              f"newest {newest.isoformat() if newest else 'n/a'}")
+
+
+def build_parser():
+    common = argparse.ArgumentParser(add_help=False)
+    for flags, kwargs in [
+        (["--profile"], {"default": argparse.SUPPRESS, "help": "AWS profile"}),
+        (["--region"], {"default": argparse.SUPPRESS,
+                        "help": "AWS region (defaults to your profile's region, "
+                                "falling back to us-east-2 where phossil's data lives)"}),
+        (["--output"], {"choices": ["table", "json"], "default": argparse.SUPPRESS,
+                        "help": "output format (default table)"}),
+        (["--segments"], {"type": int, "default": argparse.SUPPRESS,
+                          "help": "parallel scan segments (default 8)"}),
+        (["--yes"], {"action": "store_true", "default": argparse.SUPPRESS,
+                     "help": "skip confirmation on expensive scans"}),
+    ]:
+        common.add_argument(*flags, **kwargs)
+
+    parser = argparse.ArgumentParser(
+        prog="phossil",
+        parents=[common],
+        description="Query tools for phossil's DynamoDB tables and S3 archive.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def add(name, help_text, func):
+        p = sub.add_parser(name, parents=[common], help=help_text)
+        p.set_defaults(func=func)
+        return p
+
+    p = add("key", "derive a url-relationships relationship_id", cmd_key)
+    p.add_argument("--fetched", required=True, help="crawled page URL")
+    p.add_argument("--original", required=True, help="original PhishTank URL")
+    p.add_argument("--href", required=True, help="referenced URL")
+
+    p = add("get", "fetch one row by digest, relationship_id, or URL", cmd_get)
+    p.add_argument("key")
+
+    p = add("where", "everything known about a URL or FQDN", cmd_where)
+    p.add_argument("target")
+    p.add_argument("--limit", type=int, default=25)
+    p.add_argument("--include-relationships", action="store_true",
+                   help="also scan the 13.5M-row link graph")
+
+    p = add("relationships", "hrefs from a crawled page (or --to for inbound)", cmd_relationships)
+    p.add_argument("source", nargs="?")
+    p.add_argument("--to", help="find links pointing at this URL")
+
+    p = add("crawl-tree", "reconstruct the scan frontier for a PhishTank URL", cmd_crawl_tree)
+    p.add_argument("original")
+    p.add_argument("--limit", type=int, default=25)
+
+    p = add("digests", "distinct file digests with source counts", cmd_digests)
+    p.add_argument("--dups-only", action="store_true")
+
+    p = add("filetypes", "category and filetype breakdowns", cmd_filetypes)
+    p.add_argument("--top", type=int, default=15)
+    p.add_argument("--mismatches", action="store_true",
+                   help="rows where content disagrees with the URL extension")
+
+    p = add("kits", "archived files whose source URL contains a substring", cmd_kits)
+    p.add_argument("domain")
+    p.add_argument("--category")
+
+    p = add("fqdn-stats", "top registrable domains in known phishing URLs", cmd_fqdn_stats)
+    p.add_argument("--top", type=int, default=25)
+
+    p = add("export", "export a table as jsonl, csv, or sqlite", cmd_export)
+    p.add_argument("table", help="known | relationships | archive")
+    p.add_argument("--format", choices=["json", "csv", "sqlite"], default="json")
+    p.add_argument("--out", help="path for --format sqlite")
+    p.add_argument("--where", action="append", metavar="COL=VALUE")
+
+    p = add("stats", "table, queue, and archive overview", cmd_stats)
+    p.add_argument("--exact", action="store_true",
+                   help="COUNT scans instead of approximate item counts")
+
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    args.profile = getattr(args, "profile", os.environ.get("AWS_PROFILE"))
+    args.region = getattr(args, "region", None)
+    args.output = getattr(args, "output", "table")
+    args.segments = getattr(args, "segments", 8)
+    args.yes = getattr(args, "yes", False)
+    if args.command == "key":
+        args.func(args, None)
+        return
+    session = make_session(args)
+    if args.region is None:
+        args.region = session.region_name or "us-east-2"
+    client = session.client("dynamodb")
+    args.func(args, client)
+
+
+if __name__ == "__main__":
+    main()
