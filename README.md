@@ -49,11 +49,13 @@ phossil has been running continuously in us-east-2 since March 26, 2022 - 4.5 ye
 
 | Metric | Count |
 |---|---|
-| Unique confirmed phishing URLs seen and deduplicated | 1,179,865 |
+| Unique confirmed phishing URLs seen and deduplicated | 1,179,878 |
 | Link relationships mapped between phishing pages | 13,513,179 |
 | Files downloaded from confirmed phishing sites for analysis | 13,438 |
 
-The downloaded files break down into a long tail of phishing kits (`.zip`, by far the most common), PDFs masquerading as invoices or delivery notices, APK droppers, and the occasional `.env` or `web.config` the kit author forgot to protect. Roughly 1,200 of those archives are real, distinct phishing kits - the rest are duplicate uploads, victim-facing documents, and other malware that was squatting on the same hosting.
+What's in those 13,438 downloads is its own story. The bulk of it (9,357 files) is victim-facing paperwork - 5,631 PDFs masquerading as invoices, delivery notices, and "secure message" portals - followed by 3,610 archives, which is where the actual phishing kits live (3,201 zips, plus gz/tar/rar stragglers). Rounding it out: 360 installers (mostly APK droppers), 91 executables, 17 scripts including offensive tooling like `linpeas.sh`, and 3 forgotten dotfiles - two `.env` files and one SSH public key a kit author shipped by accident. Counting by content hash instead of URL, those downloads are 9,483 unique files; roughly a third were the same file hosted at multiple URLs, which tells you a lot about how kit authors spread their work around.
+
+Roughly 1,200 of the archives are real, distinct phishing kits - the rest are duplicate uploads, victim-facing documents, and other malware that was squatting on the same hosting.
 
 If you're an investigator who needs comprehensive kit coverage, use [StalkPhish](https://github.com/t4d/StalkPhish) or [PhishingKitHunter](https://github.com/t4d/PhishingKitHunter) - both are great tools and cover targets more thoroughly than phossil does. phossil was built to be cheap, set-and-forget infrastructure that reliably gets *something* from *every* confirmed site, not to be the deepest crawler on the market.
 
